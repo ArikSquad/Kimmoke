@@ -41,12 +41,18 @@ public final class NioLimboServer {
     private static final int PLAY_C_CHUNK_BATCH_FINISHED = 0x0B;
     private static final int PLAY_C_CHUNK_BATCH_START = 0x0C;
     private static final int PLAY_C_CUSTOM_PAYLOAD = 0x18;
+    private static final int PLAY_C_GAME_EVENT = 0x26;
     private static final int PLAY_C_MAP_CHUNK = 0x2C;
     private static final int PLAY_C_LOGIN = 0x30;
+    private static final int PLAY_C_PLAYER_ABILITIES = 0x3E;
     private static final int PLAY_C_POSITION = 0x46;
     private static final int PLAY_C_UPDATE_VIEW_POSITION = 0x5C;
     private static final int PLAY_C_UPDATE_VIEW_DISTANCE = 0x5D;
     private static final int PLAY_C_SPAWN_POSITION = 0x5F;
+    private static final int PLAY_C_SET_HELD_ITEM = 0x67;
+    private static final int PLAY_C_SET_EXPERIENCE = 0x65;
+    private static final int PLAY_C_SET_HEALTH = 0x66;
+    private static final int PLAY_C_SET_TIME = 0x6F;
 
     private final String host;
     private final int port;
@@ -497,6 +503,34 @@ public final class NioLimboServer {
 
         queue(connection, PLAY_C_LOGIN, login);
 
+        ByteArrayOutputStream abilities = new ByteArrayOutputStream();
+        MinecraftCodec.writeByte(abilities, 0x00);
+        MinecraftCodec.writeFloat(abilities, 0.05f);
+        MinecraftCodec.writeFloat(abilities, 0.10f);
+        queue(connection, PLAY_C_PLAYER_ABILITIES, abilities);
+
+        ByteArrayOutputStream heldItem = new ByteArrayOutputStream();
+        MinecraftCodec.writeVarInt(heldItem, 0);
+        queue(connection, PLAY_C_SET_HELD_ITEM, heldItem);
+
+        ByteArrayOutputStream health = new ByteArrayOutputStream();
+        MinecraftCodec.writeFloat(health, 20.0f);
+        MinecraftCodec.writeVarInt(health, 20);
+        MinecraftCodec.writeFloat(health, 5.0f);
+        queue(connection, PLAY_C_SET_HEALTH, health);
+
+        ByteArrayOutputStream experience = new ByteArrayOutputStream();
+        MinecraftCodec.writeFloat(experience, 0.0f);
+        MinecraftCodec.writeVarInt(experience, 0);
+        MinecraftCodec.writeVarInt(experience, 0);
+        queue(connection, PLAY_C_SET_EXPERIENCE, experience);
+
+        ByteArrayOutputStream time = new ByteArrayOutputStream();
+        MinecraftCodec.writeLong(time, 0L);
+        MinecraftCodec.writeLong(time, 6000L);
+        MinecraftCodec.writeBoolean(time, true);
+        queue(connection, PLAY_C_SET_TIME, time);
+
         ByteArrayOutputStream brandPayload = new ByteArrayOutputStream();
         MinecraftCodec.writeString(brandPayload, "minecraft:brand");
         ByteArrayOutputStream brandData = new ByteArrayOutputStream();
@@ -514,9 +548,16 @@ public final class NioLimboServer {
         queue(connection, PLAY_C_UPDATE_VIEW_POSITION, viewPos);
 
         ByteArrayOutputStream spawnPos = new ByteArrayOutputStream();
+        MinecraftCodec.writeString(spawnPos, "minecraft:overworld");
         MinecraftCodec.writePosition(spawnPos, 0, 64, 0);
         MinecraftCodec.writeFloat(spawnPos, 0f);
+        MinecraftCodec.writeFloat(spawnPos, 0f);
         queue(connection, PLAY_C_SPAWN_POSITION, spawnPos);
+
+        ByteArrayOutputStream waitingChunks = new ByteArrayOutputStream();
+        MinecraftCodec.writeByte(waitingChunks, 13);
+        MinecraftCodec.writeFloat(waitingChunks, 0f);
+        queue(connection, PLAY_C_GAME_EVENT, waitingChunks);
 
         ByteArrayOutputStream playerPos = new ByteArrayOutputStream();
         MinecraftCodec.writeVarInt(playerPos, 1);
