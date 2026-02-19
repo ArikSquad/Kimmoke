@@ -1,5 +1,6 @@
 package eu.mikart.kimmoke.server;
 
+import eu.mikart.kimmoke.polar.PaletteUtil;
 import eu.mikart.kimmoke.polar.PolarChunk;
 import eu.mikart.kimmoke.polar.PolarSection;
 import eu.mikart.kimmoke.polar.PolarWorld;
@@ -17,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Deque;
 import java.util.List;
 import java.util.Random;
@@ -31,7 +34,6 @@ public final class NioLimboServer {
     private static final int LOGIN_C_SUCCESS = 0x02;
     private static final int LOGIN_C_PLUGIN_REQUEST = 0x04;
 
-    private static final int CONFIG_C_CUSTOM_PAYLOAD = 0x01;
     private static final int CONFIG_C_FINISH_CONFIGURATION = 0x03;
     private static final int CONFIG_C_REGISTRY_DATA = 0x07;
     private static final int CONFIG_C_FEATURE_FLAGS = 0x0C;
@@ -42,6 +44,7 @@ public final class NioLimboServer {
     private static final int PLAY_C_CHUNK_BATCH_START = 0x0C;
     private static final int PLAY_C_CUSTOM_PAYLOAD = 0x18;
     private static final int PLAY_C_GAME_EVENT = 0x26;
+    private static final int PLAY_C_KEEP_ALIVE = 0x2b;
     private static final int PLAY_C_MAP_CHUNK = 0x2C;
     private static final int PLAY_C_LOGIN = 0x30;
     private static final int PLAY_C_PLAYER_ABILITIES = 0x3E;
@@ -53,6 +56,7 @@ public final class NioLimboServer {
     private static final int PLAY_C_SET_EXPERIENCE = 0x65;
     private static final int PLAY_C_SET_HEALTH = 0x66;
     private static final int PLAY_C_SET_TIME = 0x6F;
+    private static final long KEEP_ALIVE_INTERVAL_MS = 10_000L;
 
     private final String host;
     private final int port;
@@ -61,8 +65,12 @@ public final class NioLimboServer {
     private final List<TagsDataProvider.TagRegistry> tagsData;
     private final boolean velocityModernForwarding;
     private final byte[] velocitySecret;
+    private final String dimensionId;
+    private final int dimensionTypeId;
+    private final boolean hardcore;
+    private final Position spawnPosition;
 
-    public NioLimboServer(String host, int port, PolarWorld world, boolean velocityModernForwarding, String velocitySecret) {
+    public NioLimboServer(String host, int port, PolarWorld world, boolean velocityModernForwarding, String velocitySecret, DimensionType dimension, boolean hardcore, Position spawnPosition) {
         this.host = host;
         this.port = port;
         this.world = world;
@@ -70,6 +78,28 @@ public final class NioLimboServer {
         this.tagsData = TagsDataProvider.load(this.registryData);
         this.velocityModernForwarding = velocityModernForwarding;
         this.velocitySecret = velocitySecret == null ? new byte[0] : velocitySecret.getBytes(StandardCharsets.UTF_8);
+        String configuredDimensionId = dimension.getId().asString();
+        this.dimensionId = configuredDimensionId.contains(":") ? configuredDimensionId : "minecraft:" + configuredDimensionId;
+        this.dimensionTypeId = resolveDimensionTypeId(this.dimensionId, this.registryData);
+        this.hardcore = hardcore;
+        this.spawnPosition = spawnPosition == null ? Position.ZERO : spawnPosition;
+    }
+
+    private static int resolveDimensionTypeId(String selectedDimensionId, List<RegistryDataProvider.RegistryData> registryData) {
+        for (RegistryDataProvider.RegistryData registry : registryData) {
+            if (!"minecraft:dimension_type".equals(registry.id())) {
+                continue;
+            }
+
+            List<RegistryDataProvider.RegistryEntry> entries = registry.entries();
+            for (int i = 0; i < entries.size(); i++) {
+                if (selectedDimensionId.equals(entries.get(i).key())) {
+                    return i;
+                }
+            }
+            return 0;
+        }
+        return 0;
     }
 
     private static int[] resolveBlockStates(PolarSection section) {
@@ -86,9 +116,7 @@ public final class NioLimboServer {
 
         if (palette.length == 1) {
             int value = statePalette[0];
-            for (int i = 0; i < states.length; i++) {
-                states[i] = value;
-            }
+            Arrays.fill(states, value);
             return states;
         }
 
@@ -106,17 +134,48 @@ public final class NioLimboServer {
         if (stateIndex > 0) {
             block = blockState.substring(0, stateIndex);
         }
-
-        return switch (block) {
-            case "minecraft:air", "minecraft:cave_air", "minecraft:void_air" -> 0;
-            case "minecraft:stone" -> 1;
-            case "minecraft:bedrock" -> 33;
-            case "minecraft:barrier" -> 122;
-            default -> 0;
-        };
+        // Ensure block has the minecraft: prefix
+        if (!block.contains(":")) {
+            block = "minecraft:" + block;
+        }
+        return BlockStates.BLOCK_STATES.getOrDefault(block, 0);
     }
 
-    private static void writePalettedContainer(ByteArrayOutputStream out, int[] values, int fallback) {
+    private static int[] resolveBiomes(PolarSection section) {
+        int[] biomes = new int[PolarSection.BIOME_PALETTE_SIZE];
+        if (section.isEmpty()) {
+            Arrays.fill(biomes, BiomeStates.DEFAULT_BIOME_ID);
+            return biomes;
+        }
+
+        String[] palette = section.biomePalette();
+        int[] biomePalette = new int[palette.length];
+        for (int i = 0; i < palette.length; i++) {
+            biomePalette[i] = mapBiomeId(palette[i]);
+        }
+
+        if (palette.length == 1) {
+            Arrays.fill(biomes, biomePalette[0]);
+            return biomes;
+        }
+
+        int[] data = section.biomeData();
+        for (int i = 0; i < biomes.length; i++) {
+            int index = data[i];
+            biomes[i] = (index >= 0 && index < biomePalette.length) ? biomePalette[index] : BiomeStates.DEFAULT_BIOME_ID;
+        }
+        return biomes;
+    }
+
+    private static int mapBiomeId(String biomeName) {
+        String biome = biomeName;
+        if (!biome.contains(":")) {
+            biome = "minecraft:" + biome;
+        }
+        return BiomeStates.BIOME_IDS.getOrDefault(biome, BiomeStates.DEFAULT_BIOME_ID);
+    }
+
+    private static void writePalettedContainer(ByteArrayOutputStream out, int[] values, int fallback, int minBits, int maxIndirectBits, int directBits) {
         int single = values.length == 0 ? fallback : values[0];
         boolean allSame = true;
         for (int i = 1; i < values.length; i++) {
@@ -145,7 +204,24 @@ public final class NioLimboServer {
             local[i] = idx;
         }
 
-        int bits = Math.max(4, 32 - Integer.numberOfLeadingZeros(Math.max(1, palette.size() - 1)));
+        int requiredBits = 32 - Integer.numberOfLeadingZeros(Math.max(1, palette.size() - 1));
+        if (requiredBits <= maxIndirectBits) {
+            int bits = Math.max(minBits, requiredBits);
+            MinecraftCodec.writeByte(out, bits);
+            MinecraftCodec.writeVarInt(out, palette.size());
+            for (int value : palette) {
+                MinecraftCodec.writeVarInt(out, value);
+            }
+
+            writePackedIntArray(out, local, bits);
+            return;
+        }
+
+        MinecraftCodec.writeByte(out, directBits);
+        writePackedIntArray(out, values, directBits);
+    }
+
+    private static void writePackedIntArray(ByteArrayOutputStream out, int[] values, int bits) {
         int valuesPerLong = 64 / bits;
         int longCount = (int) Math.ceil(values.length / (double) valuesPerLong);
 
@@ -154,13 +230,7 @@ public final class NioLimboServer {
         for (int i = 0; i < values.length; i++) {
             int longIndex = i / valuesPerLong;
             int bitIndex = (i % valuesPerLong) * bits;
-            packed[longIndex] |= ((long) local[i] & mask) << bitIndex;
-        }
-
-        MinecraftCodec.writeByte(out, bits);
-        MinecraftCodec.writeVarInt(out, palette.size());
-        for (int value : palette) {
-            MinecraftCodec.writeVarInt(out, value);
+            packed[longIndex] |= ((long) values[i] & mask) << bitIndex;
         }
         MinecraftCodec.writeVarInt(out, packed.length);
         for (long l : packed) {
@@ -168,39 +238,18 @@ public final class NioLimboServer {
         }
     }
 
-    public void run() throws Exception {
-        Selector selector = Selector.open();
-        ServerSocketChannel server = ServerSocketChannel.open();
-        server.configureBlocking(false);
-        server.bind(new InetSocketAddress(host, port));
-        server.register(selector, SelectionKey.OP_ACCEPT);
-
-        while (true) {
-            selector.select(10);
-            var iterator = selector.selectedKeys().iterator();
-            while (iterator.hasNext()) {
-                SelectionKey key = iterator.next();
-                iterator.remove();
-
-                if (!key.isValid()) {
-                    continue;
-                }
-
-                try {
-                    if (key.isAcceptable()) {
-                        accept(selector, server);
-                    }
-                    if (key.isReadable()) {
-                        read(key);
-                    }
-                    if (key.isWritable()) {
-                        write(key);
-                    }
-                } catch (Exception e) {
-                    closeKey(key);
-                }
-            }
+    private static void writeLongArray(ByteArrayOutputStream out, long[] values) {
+        MinecraftCodec.writeVarInt(out, values.length);
+        for (long value : values) {
+            MinecraftCodec.writeLong(out, value);
         }
+    }
+
+    private static int[] normalizeHeightmap(int[] heightmap) {
+        if (heightmap == null || heightmap.length != PolarChunk.HEIGHTMAP_SIZE) {
+            return new int[PolarChunk.HEIGHTMAP_SIZE];
+        }
+        return heightmap;
     }
 
     private void accept(Selector selector, ServerSocketChannel server) throws Exception {
@@ -473,13 +522,83 @@ public final class NioLimboServer {
         return payload;
     }
 
+    private static void writeBitSet(ByteArrayOutputStream out, BitSet bitSet) {
+        long[] longs = bitSet.toLongArray();
+        MinecraftCodec.writeVarInt(out, longs.length);
+        for (long value : longs) {
+            MinecraftCodec.writeLong(out, value);
+        }
+    }
+
+    public void run() throws Exception {
+        Selector selector = Selector.open();
+        ServerSocketChannel server = ServerSocketChannel.open();
+        server.configureBlocking(false);
+        server.bind(new InetSocketAddress(host, port));
+        server.register(selector, SelectionKey.OP_ACCEPT);
+
+        while (true) {
+            selector.select(10);
+            var iterator = selector.selectedKeys().iterator();
+            while (iterator.hasNext()) {
+                SelectionKey key = iterator.next();
+                iterator.remove();
+
+                if (!key.isValid()) {
+                    continue;
+                }
+
+                try {
+                    if (key.isAcceptable()) {
+                        accept(selector, server);
+                    }
+                    if (key.isReadable()) {
+                        read(key);
+                    }
+                    if (key.isWritable()) {
+                        write(key);
+                    }
+                } catch (Exception e) {
+                    closeKey(key);
+                }
+            }
+
+            sendKeepAlives(selector);
+        }
+    }
+
+    private void sendKeepAlives(Selector selector) {
+        long keepAliveId = System.currentTimeMillis();
+        for (SelectionKey key : selector.keys()) {
+            if (!key.isValid()) {
+                continue;
+            }
+            Object attachment = key.attachment();
+            if (!(attachment instanceof Connection connection)) {
+                continue;
+            }
+            if (connection.state != ConnectionState.PLAY) {
+                continue;
+            }
+            if (keepAliveId - connection.lastKeepAliveSentAt < KEEP_ALIVE_INTERVAL_MS) {
+                continue;
+            }
+
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
+            MinecraftCodec.writeLong(payload, keepAliveId);
+            queue(connection, PLAY_C_KEEP_ALIVE, payload);
+            connection.lastKeepAliveSentAt = keepAliveId;
+            key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+        }
+    }
+
     private void sendPlayPackets(Connection connection) {
         ByteArrayOutputStream login = new ByteArrayOutputStream();
         MinecraftCodec.writeInt(login, 1);
-        MinecraftCodec.writeBoolean(login, false);
+        MinecraftCodec.writeBoolean(login, hardcore);
 
         MinecraftCodec.writeVarInt(login, 1);
-        MinecraftCodec.writeString(login, "minecraft:overworld");
+        MinecraftCodec.writeString(login, dimensionId);
 
         MinecraftCodec.writeVarInt(login, 1);
         MinecraftCodec.writeVarInt(login, 8);
@@ -488,8 +607,8 @@ public final class NioLimboServer {
         MinecraftCodec.writeBoolean(login, true);
         MinecraftCodec.writeBoolean(login, false);
 
-        MinecraftCodec.writeVarInt(login, 0);
-        MinecraftCodec.writeString(login, "minecraft:overworld");
+        MinecraftCodec.writeVarInt(login, dimensionTypeId);
+        MinecraftCodec.writeString(login, dimensionId);
         MinecraftCodec.writeLong(login, 0L);
         MinecraftCodec.writeByte(login, 0);
         MinecraftCodec.writeByte(login, 0xFF);
@@ -548,10 +667,10 @@ public final class NioLimboServer {
         queue(connection, PLAY_C_UPDATE_VIEW_POSITION, viewPos);
 
         ByteArrayOutputStream spawnPos = new ByteArrayOutputStream();
-        MinecraftCodec.writeString(spawnPos, "minecraft:overworld");
-        MinecraftCodec.writePosition(spawnPos, 0, 64, 0);
-        MinecraftCodec.writeFloat(spawnPos, 0f);
-        MinecraftCodec.writeFloat(spawnPos, 0f);
+        MinecraftCodec.writeString(spawnPos, dimensionId);
+        MinecraftCodec.writePosition(spawnPos, (int) Math.floor(spawnPosition.x()), (int) Math.floor(spawnPosition.y()), (int) Math.floor(spawnPosition.z()));
+        MinecraftCodec.writeFloat(spawnPos, spawnPosition.yaw());
+        MinecraftCodec.writeFloat(spawnPos, spawnPosition.pitch());
         queue(connection, PLAY_C_SPAWN_POSITION, spawnPos);
 
         ByteArrayOutputStream waitingChunks = new ByteArrayOutputStream();
@@ -561,14 +680,14 @@ public final class NioLimboServer {
 
         ByteArrayOutputStream playerPos = new ByteArrayOutputStream();
         MinecraftCodec.writeVarInt(playerPos, 1);
-        MinecraftCodec.writeDouble(playerPos, 0.5);
-        MinecraftCodec.writeDouble(playerPos, 65.0);
-        MinecraftCodec.writeDouble(playerPos, 0.5);
+        MinecraftCodec.writeDouble(playerPos, spawnPosition.x());
+        MinecraftCodec.writeDouble(playerPos, spawnPosition.y());
+        MinecraftCodec.writeDouble(playerPos, spawnPosition.z());
         MinecraftCodec.writeDouble(playerPos, 0.0);
         MinecraftCodec.writeDouble(playerPos, 0.0);
         MinecraftCodec.writeDouble(playerPos, 0.0);
-        MinecraftCodec.writeFloat(playerPos, 0f);
-        MinecraftCodec.writeFloat(playerPos, 0f);
+        MinecraftCodec.writeFloat(playerPos, spawnPosition.yaw());
+        MinecraftCodec.writeFloat(playerPos, spawnPosition.pitch());
         MinecraftCodec.writeInt(playerPos, 0);
         queue(connection, PLAY_C_POSITION, playerPos);
 
@@ -589,29 +708,47 @@ public final class NioLimboServer {
         MinecraftCodec.writeInt(out, chunk.x());
         MinecraftCodec.writeInt(out, chunk.z());
 
-        MinecraftCodec.writeVarInt(out, 1);
-        MinecraftCodec.writeVarInt(out, 1);
-        MinecraftCodec.writeVarInt(out, 0);
+        writeHeightmaps(out, chunk);
 
         ByteArrayOutputStream chunkData = new ByteArrayOutputStream();
-        for (PolarSection section : chunk.sections()) {
+        PolarSection[] sections = chunk.sections();
+        int expectedSections = world.sectionCount();
+        PolarSection emptySection = new PolarSection();
+        for (int i = 0; i < expectedSections; i++) {
+            PolarSection section = i < sections.length && sections[i] != null ? sections[i] : emptySection;
             writeChunkSection(chunkData, section);
         }
         byte[] chunkDataBytes = chunkData.toByteArray();
         MinecraftCodec.writeVarInt(out, chunkDataBytes.length);
         out.writeBytes(chunkDataBytes);
 
-        MinecraftCodec.writeVarInt(out, 0);
+        MinecraftCodec.writeVarInt(out, 0); // block entities
 
-        MinecraftCodec.writeVarInt(out, 0);
-        MinecraftCodec.writeVarInt(out, 0);
-        MinecraftCodec.writeVarInt(out, 0);
-        MinecraftCodec.writeVarInt(out, 0);
+        writeBitSet(out, new BitSet()); // sky light mask
+        writeBitSet(out, new BitSet()); // block light mask
+        writeBitSet(out, new BitSet()); // empty sky light mask
+        writeBitSet(out, new BitSet()); // empty block light mask
 
-        MinecraftCodec.writeVarInt(out, 0);
-        MinecraftCodec.writeVarInt(out, 0);
+        MinecraftCodec.writeVarInt(out, 0); // sky light array count
+        MinecraftCodec.writeVarInt(out, 0); // block light array count
 
         return out;
+    }
+
+    private void writeHeightmaps(ByteArrayOutputStream out, PolarChunk chunk) {
+        MinecraftCodec.writeVarInt(out, 2);
+
+        MinecraftCodec.writeVarInt(out, 4); // motion_blocking
+        writeLongArray(out, packHeightmap(normalizeHeightmap(chunk.heightmap(PolarChunk.HEIGHTMAP_MOTION_BLOCKING))));
+
+        MinecraftCodec.writeVarInt(out, 1); // world_surface
+        writeLongArray(out, packHeightmap(normalizeHeightmap(chunk.heightmap(PolarChunk.HEIGHTMAP_WORLD_SURFACE))));
+    }
+
+    private long[] packHeightmap(int[] values) {
+        int worldHeight = world.sectionCount() * 16;
+        int bitsPerEntry = Math.max(1, PaletteUtil.bitsToRepresent(worldHeight));
+        return PaletteUtil.pack(values, bitsPerEntry);
     }
 
     private void writeChunkSection(ByteArrayOutputStream out, PolarSection section) {
@@ -626,10 +763,10 @@ public final class NioLimboServer {
 
         MinecraftCodec.writeShort(out, blockCount);
 
-        writePalettedContainer(out, blockStates, 0);
+        writePalettedContainer(out, blockStates, 0, 4, 8, 15);
 
-        int[] biomes = new int[64];
-        writePalettedContainer(out, biomes, 0);
+        int[] biomes = resolveBiomes(section);
+        writePalettedContainer(out, biomes, BiomeStates.DEFAULT_BIOME_ID, 1, 3, 7);
     }
 
     private void queue(Connection connection, int packetId, ByteArrayOutputStream payload) {
@@ -681,6 +818,7 @@ public final class NioLimboServer {
         private int clientProtocol = 0;
         private int velocityQueryId = 0;
         private boolean closeAfterFlush = false;
+        private long lastKeepAliveSentAt = 0L;
 
         private Connection(SocketChannel channel) {
             this.channel = channel;

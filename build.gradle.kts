@@ -12,7 +12,9 @@ repositories {
 dependencies {
     implementation("com.github.luben:zstd-jni:1.5.6-6")
     implementation("de.exlll:configlib-yaml:4.8.1")
+    implementation("net.kyori:adventure-key:4.26.1")
     compileOnly("org.projectlombok:lombok:1.18.42")
+    annotationProcessor("org.projectlombok:lombok:1.18.42")
 
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")

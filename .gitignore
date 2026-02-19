@@ -43,3 +43,6 @@ bin/
 .DS_Store
 .idea/
 config.yml
+
+protocol.json
+limbo.polar

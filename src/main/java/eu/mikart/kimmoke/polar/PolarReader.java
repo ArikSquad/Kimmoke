@@ -1,6 +1,7 @@
 package eu.mikart.kimmoke.polar;
 
 import com.github.luben.zstd.Zstd;
+import net.kyori.adventure.key.Key;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -104,6 +105,7 @@ public final class PolarReader {
         if (dataVersion < converter.dataVersion()) {
             converter.convertBlockPalette(blockPalette, dataVersion, converter.dataVersion());
         }
+        upgradeGrassInPalette(blockPalette, version);
 
         int[] blockData = null;
         if (blockPalette.length > 1) {
@@ -169,11 +171,24 @@ public final class PolarReader {
         boolean hasNbt = version <= PolarWorld.VERSION_USERDATA_OPT_BLOCK_ENT_NBT || reader.readBoolean();
         if (hasNbt) {
             int nbtStart = reader.position();
-            NbtSkipper.skipNbt(reader);
+            NbtSkipper.skipNbt(reader, version <= PolarWorld.VERSION_MINESTOM_NBT_READ_BREAK);
             nbt = Arrays.copyOfRange(reader.array(), nbtStart, reader.position());
         }
 
         return new PolarChunk.BlockEntity(x, y, z, id, nbt);
+    }
+
+    private static void upgradeGrassInPalette(String[] blockPalette, int version) {
+        if (version <= PolarWorld.VERSION_SHORT_GRASS) {
+            for (int i = 0; i < blockPalette.length; i++) {
+                if (blockPalette[i].contains("grass")) {
+                    String strippedId = blockPalette[i].split("\\[")[0];
+                    if (Key.key(strippedId).value().equals("grass")) {
+                        blockPalette[i] = "short_grass";
+                    }
+                }
+            }
+        }
     }
 
     private static int[][] readHeightmaps(Reader reader, boolean skip) {
@@ -332,12 +347,14 @@ public final class PolarReader {
         private NbtSkipper() {
         }
 
-        static void skipNbt(Reader reader) {
+        static void skipNbt(Reader reader, boolean legacyNamedRoot) {
             int rootType = reader.readByte() & 0xFF;
             if (rootType == 0) {
                 return;
             }
-            skipString(reader);
+            if (legacyNamedRoot) {
+                skipString(reader);
+            }
             skipPayload(reader, rootType);
         }
 

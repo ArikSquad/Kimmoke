@@ -14,14 +14,11 @@ public final class LimboWorldLoader {
     private LimboWorldLoader() {
     }
 
-    public static PolarWorld load(Path path) {
-        try {
-            if (Files.exists(path) && Files.isRegularFile(path)) {
-                return PolarReader.read(path);
-            }
-        } catch (Exception ignored) {
+    public static PolarWorld load(Path path) throws Exception {
+        if (Files.exists(path) && Files.isRegularFile(path)) {
+            return PolarReader.read(path);
         }
-        return emptyWorld();
+        throw new Exception("Polar world file not found at " + path);
     }
 
     public static PolarWorld emptyWorld() {
