@@ -67,6 +67,8 @@ public final class NioLimboServer {
     private final byte[] velocitySecret;
     private final String dimensionId;
     private final int dimensionTypeId;
+    private final int dimensionMinSection;
+    private final int dimensionSectionCount;
     private final boolean hardcore;
     private final Position spawnPosition;
 
@@ -81,6 +83,14 @@ public final class NioLimboServer {
         String configuredDimensionId = dimension.getId().asString();
         this.dimensionId = configuredDimensionId.contains(":") ? configuredDimensionId : "minecraft:" + configuredDimensionId;
         this.dimensionTypeId = resolveDimensionTypeId(this.dimensionId, this.registryData);
+        this.dimensionMinSection = switch (dimension) {
+            case OVERWORLD -> -4;
+            case THE_NETHER, THE_END -> 0;
+        };
+        this.dimensionSectionCount = switch (dimension) {
+            case OVERWORLD -> 24;
+            case THE_NETHER, THE_END -> 16;
+        };
         this.hardcore = hardcore;
         this.spawnPosition = spawnPosition == null ? Position.ZERO : spawnPosition;
     }
@@ -712,10 +722,14 @@ public final class NioLimboServer {
 
         ByteArrayOutputStream chunkData = new ByteArrayOutputStream();
         PolarSection[] sections = chunk.sections();
-        int expectedSections = world.sectionCount();
+        int worldMinSection = world.minSection();
         PolarSection emptySection = new PolarSection();
-        for (int i = 0; i < expectedSections; i++) {
-            PolarSection section = i < sections.length && sections[i] != null ? sections[i] : emptySection;
+        for (int i = 0; i < dimensionSectionCount; i++) {
+            int sectionY = dimensionMinSection + i;
+            int sourceIndex = sectionY - worldMinSection;
+            PolarSection section = sourceIndex >= 0 && sourceIndex < sections.length && sections[sourceIndex] != null
+                ? sections[sourceIndex]
+                : emptySection;
             writeChunkSection(chunkData, section);
         }
         byte[] chunkDataBytes = chunkData.toByteArray();
@@ -746,7 +760,7 @@ public final class NioLimboServer {
     }
 
     private long[] packHeightmap(int[] values) {
-        int worldHeight = world.sectionCount() * 16;
+        int worldHeight = dimensionSectionCount * 16;
         int bitsPerEntry = Math.max(1, PaletteUtil.bitsToRepresent(worldHeight));
         return PaletteUtil.pack(values, bitsPerEntry);
     }
