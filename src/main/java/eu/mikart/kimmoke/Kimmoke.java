@@ -1,7 +1,6 @@
 package eu.mikart.kimmoke;
 
 import de.exlll.configlib.YamlConfigurations;
-import eu.mikart.kimmoke.server.LimboWorldLoader;
 import eu.mikart.kimmoke.server.NioLimboServer;
 import lombok.Getter;
 
@@ -14,13 +13,13 @@ public class Kimmoke {
     static void main() throws Exception {
         settings = YamlConfigurations.update(Path.of("config.yml"), Settings.class);
 
-        var world = LimboWorldLoader.load(Path.of(settings.getWorldPath()));
         var server = new NioLimboServer(
             "0.0.0.0",
             settings.getPort(),
-            world,
             settings.isVelocityModernForwarding(),
-            settings.getVelocitySecret()
+            settings.getVelocitySecret(),
+            false,
+            settings.getSpawnPosition()
         );
         server.run();
     }
